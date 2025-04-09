@@ -1,0 +1,120 @@
+#include <WiFi.h>
+#include <FirebaseESP32.h>
+
+#define FIREBASE_HOST ""
+#define FIREBASE_API_KEY ""
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
+#define USER_EMAIL ""
+#define USER_PASSWORD ""
+
+// Khởi tạo đối tượng Firebase
+FirebaseData firebaseData;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// Cấu hình UART cho giao tiếp với STM32
+#define RXD2 16  // Chân RX của ESP32 nối với TX của STM32
+#define TXD2 17  // Chân TX của ESP32 nối với RX của STM32
+
+void setup() {
+    Serial.begin(115200);        // Serial chính để debug
+    Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2); // Serial2 cho STM32, baud rate 9600
+
+    // Kết nối WiFi
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("Connecting to WiFi");
+    unsigned long wifiTimeout = millis() + 10000;
+    while (WiFi.status() != WL_CONNECTED && millis() < wifiTimeout) {
+        Serial.print(".");
+        delay(500);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\n❌ WiFi Connection Failed!");
+        return;
+    }
+    Serial.println("\n✅ Connected to WiFi!");
+
+    // Cấu hình Firebase
+    config.host = FIREBASE_HOST;
+    config.api_key = FIREBASE_API_KEY;
+    auth.user.email = USER_EMAIL;
+    auth.user.password = USER_PASSWORD;
+
+    Firebase.begin(&config, &auth);
+    Firebase.reconnectWiFi(true);
+
+    Serial.println("Connecting to Firebase...");
+    unsigned long authTimeout = millis() + 10000;
+    while (!Firebase.ready() && millis() < authTimeout) {
+        Serial.print(".");
+        delay(1000);
+    }
+    if (!Firebase.ready()) {
+        Serial.println("\n❌ Firebase Connection Failed!");
+        return;
+    }
+    Serial.println("\n✅ Connected to Firebase!");
+}
+
+void loop() {
+    static unsigned long lastMillis = 0;
+    if (millis() - lastMillis > 5000 && Firebase.ready()) {
+        lastMillis = millis();
+
+        // 1. Nhận dữ liệu từ STM32 qua UART
+        if (Serial2.available()) {
+            String dataFromSTM32 = Serial2.readStringUntil('\n');
+            Serial.println("📥 Received from STM32: " + dataFromSTM32);
+
+            // Phân tích dữ liệu: "T:25C H:60% M:45%"
+            int temp = parseValue(dataFromSTM32, "T:", "C");
+            int humi = parseValue(dataFromSTM32, "H:", "%");
+            int soil = parseValue(dataFromSTM32, "M:", "%");
+
+            // 2. Gửi dữ liệu lên Firebase
+            sendToFirebase("/gardens/SG-01/devices/temp_sensor/value", temp);
+            sendToFirebase("/gardens/SG-01/devices/humi_sensor/value", humi);
+            sendToFirebase("/gardens/SG-01/devices/soil_sensor/value", soil);
+        }
+
+        // 3. Nhận lệnh từ Firebase
+        bool pumpState = getFromFirebase("/gardens/SG-01/devices/pump/status");
+        bool ledState = getFromFirebase("/gardens/SG-01/devices/led/status");
+
+        // 4. Gửi lệnh xuống STM32 qua UART
+        String command = "PUMP:" + String(pumpState ? "ON" : "OFF") + ",LED:" + String(ledState ? "ON" : "OFF") + "\r\n";
+        Serial2.print(command);
+        Serial.println("📤 Sent to STM32: " + command);
+    }
+}
+
+// Hàm phân tích giá trị từ chuỗi dữ liệu STM32
+int parseValue(String data, String key, String unit) {
+    int startIndex = data.indexOf(key) + key.length();
+    int endIndex = data.indexOf(unit, startIndex);
+    if (startIndex == -1 || endIndex == -1) return 0; // Trả về 0 nếu không tìm thấy
+    String valueStr = data.substring(startIndex, endIndex);
+    return valueStr.toInt();
+}
+
+// Hàm gửi dữ liệu lên Firebase
+void sendToFirebase(String path, int value) {
+    if (Firebase.setInt(firebaseData, path, value)) {
+        Serial.println("✅ Sent to Firebase: " + path + " = " + String(value));
+    } else {
+        Serial.println("❌ Failed to send to Firebase: " + firebaseData.errorReason());
+    }
+}
+
+// Hàm nhận dữ liệu từ Firebase
+bool getFromFirebase(String path) {
+    if (Firebase.getBool(firebaseData, path)) {
+        bool value = firebaseData.boolData();
+        Serial.println("📥 Received from Firebase: " + path + " = " + String(value));
+        return value;
+    } else {
+        Serial.println("❌ Failed to get from Firebase: " + firebaseData.errorReason());
+        return false; // Giá trị mặc định nếu lỗi
+    }
+}
